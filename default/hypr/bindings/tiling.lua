@@ -41,10 +41,7 @@ o.bind("SUPER + SHIFT + RIGHT", "Swap window to the right", hl.dsp.window.swap({
 o.bind("SUPER + SHIFT + UP", "Swap window up", hl.dsp.window.swap({ direction = "u" }))
 o.bind("SUPER + SHIFT + DOWN", "Swap window down", hl.dsp.window.swap({ direction = "d" }))
 
-o.bind("ALT + TAB", "Focus on next window", hl.dsp.window.cycle_next())
-o.bind("ALT + SHIFT + TAB", "Focus on previous window", hl.dsp.window.cycle_next({ next = false }))
-o.bind("ALT + TAB", "Reveal active window on top", hl.dsp.window.bring_to_top())
-o.bind("ALT + SHIFT + TAB", "Reveal active window on top", hl.dsp.window.bring_to_top())
+o.bind("ALT + TAB", "Workspace overview", "omarchy-shell shell toggle omarchy.workspace-overview")
 
 o.bind("CTRL + ALT + TAB", "Focus on next monitor", hl.dsp.focus({ monitor = "+1" }))
 o.bind("CTRL + ALT + SHIFT + TAB", "Focus on previous monitor", hl.dsp.focus({ monitor = "-1" }))
