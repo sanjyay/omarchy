@@ -40,7 +40,7 @@ cat >"$session" <<EOF
 {"timestamp":"$timestamp","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":180,"cached_input_tokens":110,"output_tokens":30,"reasoning_output_tokens":8,"total_tokens":210},"last_token_usage":{"input_tokens":80,"cached_input_tokens":50,"output_tokens":10,"reasoning_output_tokens":3,"total_tokens":90}}}}
 EOF
 
-result=$(HOME="$TEST_HOME" CODEX_HOME="$TEST_HOME/.codex" PATH="$TEST_HOME/bin:$PATH" \
+result=$(HOME="$TEST_HOME" CODEX_HOME="$TEST_HOME/.codex" XDG_DATA_HOME="$TEST_HOME/.local/share" PATH="$TEST_HOME/bin:$PATH" \
   "$ROOT/bin/omarchy-agent-usage-codex")
 
 [[ $(jq -r '.todayTotalTokens' <<<"$result") == "210" ]] ||
@@ -54,3 +54,52 @@ pass "Codex collector does not double-count cache or reasoning tokens"
 [[ $(jq -c '.id + "/" + (.limits|tostring)' <<<"$result") == '"codex/[]"' ]] ||
   fail "Codex collector identifies itself with an empty limits list" "$result"
 pass "Codex collector identifies itself with an empty limits list"
+
+# A subscription burned entirely through opencode has no native session files;
+# usage must come from opencode's message database, filtered to OpenAI.
+OPENCODE_HOME=$(mktemp -d)
+trap 'rm -rf "$TEST_HOME" "$OPENCODE_HOME"' EXIT
+mkdir -p "$OPENCODE_HOME/bin"
+cp "$TEST_HOME/bin/codex" "$OPENCODE_HOME/bin/codex"
+
+python3 - "$OPENCODE_HOME/.local/share/opencode/opencode.db" <<'PY'
+import json
+import sqlite3
+import sys
+import time
+from pathlib import Path
+
+db = Path(sys.argv[1])
+db.parent.mkdir(parents=True, exist_ok=True)
+conn = sqlite3.connect(db)
+conn.execute("CREATE TABLE message (id text PRIMARY KEY, session_id text NOT NULL, time_created integer NOT NULL, time_updated integer NOT NULL, data text NOT NULL)")
+now_ms = int(time.time() * 1000)
+
+def message(id, provider, model, role="assistant", input=0, output=0, read=0, write=0):
+  return (id, "ses_1", now_ms, now_ms, json.dumps({
+    "role": role,
+    "providerID": provider,
+    "modelID": model,
+    "tokens": {"input": input, "output": output, "reasoning": 0, "cache": {"read": read, "write": write}},
+    "time": {"created": now_ms},
+  }))
+
+conn.executemany("INSERT INTO message VALUES (?, ?, ?, ?, ?)", [
+  message("msg_1", "openai", "gpt-5.2-codex", input=80, output=40, read=30),
+  message("msg_2", "anthropic", "claude-opus-5", input=999, output=999),
+  message("msg_3", "openai", "gpt-5.2-codex", role="user"),
+])
+conn.commit()
+conn.close()
+PY
+
+result=$(HOME="$OPENCODE_HOME" CODEX_HOME="$OPENCODE_HOME/.codex" XDG_DATA_HOME="$OPENCODE_HOME/.local/share" \
+  PATH="$OPENCODE_HOME/bin:$PATH" "$ROOT/bin/omarchy-agent-usage-codex")
+
+[[ $(jq -r '.todayTotalTokens' <<<"$result") == "150" ]] ||
+  fail "Codex collector counts OpenAI usage from opencode sessions" "$result"
+pass "Codex collector counts OpenAI usage from opencode sessions"
+
+[[ $(jq -c '.modelUsage' <<<"$result") == '{"gpt-5.2-codex":{"inputTokens":80,"outputTokens":40,"cacheReadInputTokens":30,"cacheCreationInputTokens":0}}' ]] ||
+  fail "Codex collector ignores other opencode providers and user messages" "$result"
+pass "Codex collector ignores other opencode providers and user messages"

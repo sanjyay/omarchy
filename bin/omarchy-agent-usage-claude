@@ -6,9 +6,10 @@
 
 Everything the agents panel shows for Claude comes from this one
 command: local transcript stats from ~/.claude/projects, the stats-cache and
-history fallbacks for machines without transcripts, and the authoritative
-rate limits from Anthropic's OAuth usage endpoint. The panel itself only ever
-reads the JSON this prints; it never talks to disk formats or endpoints.
+history fallbacks for machines without transcripts, opencode sessions that
+ran on an Anthropic provider, and the authoritative rate limits from
+Anthropic's OAuth usage endpoint. The panel itself only ever reads the JSON
+this prints; it never talks to disk formats or endpoints.
 """
 
 from __future__ import annotations
@@ -20,6 +21,7 @@ import hashlib
 import json
 import os
 import re
+import sqlite3
 import sys
 import time
 import urllib.error
@@ -315,6 +317,133 @@ def today_prompts_from_history(claude_dir: Path) -> tuple[int, int]:
   return prompts, len(sessions)
 
 
+# ---------------------------------------------------------------- opencode
+#
+# A Claude subscription burned entirely through opencode never writes a
+# transcript under ~/.claude, but opencode records per-message provider,
+# model, and token usage in its own database. Scan it for Anthropic-provider
+# messages and merge the result into whatever the transcript scan found.
+
+
+def scan_opencode_usage() -> dict[str, Any] | None:
+  db = Path(os.environ.get("XDG_DATA_HOME") or (Path.home() / ".local" / "share")) / "opencode" / "opencode.db"
+  if not db.is_file():
+    return None
+
+  today = local_date_string()
+  recent_dates = recent_date_strings()
+  recent = {day: {"date": day, "messageCount": 0} for day in recent_dates}
+  sessions: set[str] = set()
+  active_days: set[str] = set()
+  today_sessions: set[str] = set()
+  today_tokens: dict[str, int] = {}
+  usage_by_model: dict[str, dict[str, int]] = {}
+  prompts = 0
+  today_prompt_count = 0
+  today_token_total = 0
+
+  try:
+    # Read-only: opencode may be writing right now.
+    conn = sqlite3.connect(db.resolve().as_uri() + "?mode=ro", uri=True, timeout=2)
+  except sqlite3.Error:
+    return None
+  try:
+    conn.execute("PRAGMA query_only = ON")
+    for session_id, raw in conn.execute("SELECT session_id, data FROM message"):
+      try:
+        entry = json.loads(raw)
+      except Exception:
+        continue
+      if entry.get("role") != "assistant":
+        continue
+      if not str(entry.get("providerID") or "").startswith("anthropic"):
+        continue
+      tokens = entry.get("tokens") or {}
+      cache = tokens.get("cache") or {}
+      input_tokens = number(tokens.get("input"))
+      output_tokens = number(tokens.get("output"))
+      cache_read = number(cache.get("read"))
+      cache_write = number(cache.get("write"))
+      total = input_tokens + output_tokens + cache_read + cache_write
+      if total <= 0:
+        continue
+
+      created = number((entry.get("time") or {}).get("created"))
+      day = dt.datetime.fromtimestamp(created / 1000).strftime("%Y-%m-%d") if created > 0 else today
+      model = str(entry.get("modelID") or "claude").rstrip("/").split("/")[-1]
+      session_key = "opencode:" + str(session_id)
+      sessions.add(session_key)
+      active_days.add(day)
+      prompts += 1
+
+      bucket = usage_by_model.setdefault(model, empty_bucket())
+      bucket["inputTokens"] += input_tokens
+      bucket["outputTokens"] += output_tokens
+      bucket["cacheReadInputTokens"] += cache_read
+      bucket["cacheCreationInputTokens"] += cache_write
+
+      if day in recent:
+        recent[day]["messageCount"] += total
+      if day == today:
+        today_prompt_count += 1
+        today_sessions.add(session_key)
+        today_token_total += total
+        today_tokens[model] = today_tokens.get(model, 0) + total
+  except sqlite3.Error:
+    return None
+  finally:
+    conn.close()
+
+  if prompts == 0:
+    return None
+  return {
+    "todayPrompts": today_prompt_count,
+    "todaySessions": len(today_sessions),
+    "todayTotalTokens": today_token_total,
+    "todayTokensByModel": today_tokens,
+    "recentDays": [recent[day] for day in recent_dates],
+    "modelUsage": usage_by_model,
+    "totalPrompts": prompts,
+    "totalSessions": len(sessions),
+    "activeDays": len(active_days),
+    "activeDates": sorted(active_days),
+  }
+
+
+def merge_stats(base: dict[str, Any], extra: dict[str, Any]) -> dict[str, Any]:
+  merged = dict(base)
+  for key in ("todayPrompts", "todaySessions", "todayTotalTokens", "totalPrompts", "totalSessions"):
+    merged[key] = number(base.get(key)) + number(extra.get(key))
+
+  for key in ("todayTokensByModel",):
+    combined = dict(base.get(key) or {})
+    for model, count in (extra.get(key) or {}).items():
+      combined[model] = number(combined.get(model)) + number(count)
+    merged[key] = combined
+
+  usage = {model: dict(bucket) for model, bucket in (base.get("modelUsage") or {}).items()}
+  for model, bucket in (extra.get("modelUsage") or {}).items():
+    target = usage.setdefault(model, empty_bucket())
+    for field, count in (bucket or {}).items():
+      target[field] = number(target.get(field)) + number(count)
+  merged["modelUsage"] = usage
+
+  by_date: dict[str, int] = {}
+  for source in (base.get("recentDays") or [], extra.get("recentDays") or []):
+    for day in source:
+      date = str((day or {}).get("date") or "")
+      if date:
+        by_date[date] = by_date.get(date, 0) + number((day or {}).get("messageCount"))
+  merged["recentDays"] = [{"date": date, "messageCount": by_date[date]} for date in sorted(by_date)]
+
+  # Sources overlap in time, so union dates rather than summing counts. A
+  # fallback that only knows a count still bounds the answer from below.
+  dates = set(base.get("activeDates") or []) | set(extra.get("activeDates") or [])
+  merged["activeDates"] = sorted(dates)
+  merged["activeDays"] = max(len(dates), number(base.get("activeDays")), number(extra.get("activeDays")))
+  return merged
+
+
 # ------------------------------------------------------------------- limits
 
 
@@ -503,6 +632,10 @@ def main() -> int:
       today_prompts, today_sessions = today_prompts_from_history(claude_dir)
       if today_prompts or today_sessions:
         stats = dict(stats, todayPrompts=today_prompts, todaySessions=today_sessions)
+
+  opencode = scan_opencode_usage()
+  if opencode is not None:
+    stats = merge_stats(stats, opencode)
 
   access_token, expires_at_ms, plan = oauth_login(claude_dir)
   limits = collect_limits(access_token, expires_at_ms, args.force)

@@ -4,9 +4,10 @@
 # omarchy:hidden=true
 """Collect Codex usage into one display-ready JSON record.
 
-Local stats come from native Codex CLI session files (and pi sessions that
-ran through openai-codex); rate limits and the plan come from the Codex
-app-server RPC. The agents panel only ever reads the JSON this prints.
+Local stats come from native Codex CLI session files, pi sessions that ran
+through openai-codex, and opencode sessions that ran on an OpenAI provider;
+rate limits and the plan come from the Codex app-server RPC. The agents
+panel only ever reads the JSON this prints.
 """
 
 import argparse
@@ -14,6 +15,7 @@ import json
 import os
 import select
 import shutil
+import sqlite3
 import subprocess
 import time
 from datetime import datetime, timedelta, timezone
@@ -187,6 +189,45 @@ def scan_pi_sessions():
     proc.kill()
 
 
+def scan_opencode_sessions():
+  # A subscription burned entirely through opencode leaves no native session
+  # files, but opencode records per-message provider, model, and token usage
+  # in its own database. Read-only: opencode may be writing right now.
+  db = Path(os.environ.get("XDG_DATA_HOME") or (Path.home() / ".local" / "share")) / "opencode" / "opencode.db"
+  if not db.is_file():
+    return
+  try:
+    conn = sqlite3.connect(db.resolve().as_uri() + "?mode=ro", uri=True, timeout=2)
+  except sqlite3.Error:
+    return
+  try:
+    conn.execute("PRAGMA query_only = ON")
+    for session_id, raw in conn.execute("SELECT session_id, data FROM message"):
+      try:
+        entry = json.loads(raw)
+      except Exception:
+        continue
+      if entry.get("role") != "assistant":
+        continue
+      if not str(entry.get("providerID") or "").startswith("openai"):
+        continue
+      tokens = entry.get("tokens") or {}
+      cache = tokens.get("cache") or {}
+      input_tokens = number(tokens.get("input"))
+      output_tokens = number(tokens.get("output"))
+      cache_read = number(cache.get("read"))
+      cache_write = number(cache.get("write"))
+      if not (input_tokens or output_tokens or cache_read or cache_write):
+        continue
+      day = local_day((entry.get("time") or {}).get("created"))
+      model = model_name(str(entry.get("modelID") or "").rstrip("/").split("/")[-1])
+      add_usage(day, "opencode:" + str(session_id), model, input_tokens, output_tokens, cache_read, cache_write)
+  except sqlite3.Error:
+    pass
+  finally:
+    conn.close()
+
+
 def scan_native_codex_sessions():
   codex_home = Path(os.environ.get("CODEX_HOME") or (Path.home() / ".codex"))
   roots = [codex_home / "sessions", codex_home / "archived_sessions"]
@@ -349,6 +390,7 @@ def main():
 
   scan_pi_sessions()
   scan_native_codex_sessions()
+  scan_opencode_sessions()
   rpc = fetch_codex_rpc()
 
   record = {
