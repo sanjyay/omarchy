@@ -220,6 +220,23 @@ Item {
     return numberValue(p.totalPrompts) > 0 || numberValue(p.totalSessions) > 0
       || numberValue(p.activeDays) > 0 || numberValue(p.todayPrompts) > 0
       || numberValue(p.todaySessions) > 0 || (p.limits && p.limits.length > 0)
+      || !!p.balance
+  }
+
+  // A prepaid agent's credit ledger. Like rate limits, the balance is
+  // per-account and never merged across devices.
+  function balanceValue(raw) {
+    if (!raw || typeof raw !== "object") return null
+    var remaining = Number(raw.remaining)
+    var funded = Number(raw.funded)
+    if (!isFinite(remaining) || remaining < 0) return null
+    return {
+      remaining: remaining,
+      funded: isFinite(funded) && funded > 0 ? funded : 0,
+      spent: Math.max(0, Number(raw.spent) || 0),
+      currency: String(raw.currency || "USD"),
+      estimated: raw.estimated === true
+    }
   }
 
   function displayProvider(record) {
@@ -234,9 +251,11 @@ Item {
       usageStatusText: String(record.usageStatusText || ""),
       authHelpText: String(record.authHelpText || ""),
 
-      // Rate limits stay per-account and are never merged across devices.
+      // Rate limits and balances stay per-account and are never merged
+      // across devices.
       limits: Array.isArray(record.limits) ? record.limits : [],
       tierLabel: String(record.tierLabel || ""),
+      balance: balanceValue(record.balance),
 
       todayPrompts: synced ? numberValue(stats.todayPrompts) : numberValue(record.todayPrompts),
       todaySessions: synced ? numberValue(stats.todaySessions) : numberValue(record.todaySessions),
@@ -248,6 +267,7 @@ Item {
       activeDays: synced ? numberValue(stats.activeDays) : numberValue(record.activeDays),
       modelUsage: synced ? (stats.modelUsage || ({})) : (record.modelUsage || ({})),
       hasLocalStats: synced ? (stats.hasLocalStats !== false) : (record.hasLocalStats !== false),
+      hasPromptStats: synced ? (stats.hasPromptStats !== false) : (record.hasPromptStats !== false),
 
       syncEnabled: synced,
       syncDeviceCount: deviceCount,
@@ -533,6 +553,7 @@ Item {
         providerName: "",
         ready: false,
         hasLocalStats: false,
+        hasPromptStats: false,
         todayPrompts: 0,
         todaySessions: 0,
         todayTotalTokens: 0,
@@ -560,6 +581,9 @@ Item {
         if (stats.providerName && acc.providerName === "") acc.providerName = String(stats.providerName)
         acc.ready = acc.ready || stats.ready === true
         acc.hasLocalStats = acc.hasLocalStats || stats.hasLocalStats !== false
+        // Snapshots from before the field existed only came from agents that
+        // count prompts, so a missing value reads as true.
+        acc.hasPromptStats = acc.hasPromptStats || stats.hasPromptStats !== false
         acc.todayPrompts += numberValue(stats.todayPrompts)
         acc.todaySessions += numberValue(stats.todaySessions)
         acc.todayTotalTokens += numberValue(stats.todayTotalTokens)
@@ -604,6 +628,7 @@ Item {
         providerName: acc.providerName,
         ready: acc.ready || providerDevices.length > 0,
         hasLocalStats: acc.hasLocalStats,
+        hasPromptStats: acc.hasPromptStats,
         todayPrompts: acc.todayPrompts,
         todaySessions: acc.todaySessions,
         todayTotalTokens: acc.todayTotalTokens,
@@ -636,6 +661,7 @@ Item {
       providerName: String(record.name || record.id),
       ready: record.ready === true,
       hasLocalStats: record.hasLocalStats !== false,
+      hasPromptStats: record.hasPromptStats !== false,
       todayPrompts: numberValue(record.todayPrompts),
       todaySessions: numberValue(record.todaySessions),
       todayTotalTokens: numberValue(record.todayTotalTokens),
@@ -683,6 +709,7 @@ Item {
 
   function modelWordCase(word) {
     if (word === "gpt") return "GPT"
+    if (word === "deepseek") return "DeepSeek"
     return word.charAt(0).toUpperCase() + word.slice(1)
   }
 
