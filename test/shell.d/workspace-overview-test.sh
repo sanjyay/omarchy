@@ -37,6 +37,13 @@ function qmlFunction(source, name) {
 assertEqual(manifest.id, 'omarchy.workspace-overview', 'workspace overview uses the first-party plugin id')
 assertDeepEqual(manifest.kinds, ['overlay'], 'workspace overview is an overlay plugin')
 assert(manifest.keepLoaded === undefined, 'workspace overview unloads after it closes')
+assert(
+  manifest.entryPoints.overlay === 'WorkspaceOverview.qml'
+    && /function open\(payloadJson\)/.test(overview)
+    && /function close\(\)/.test(overview)
+    && /function toggle\(\)/.test(overview),
+  'workspace overview remains available through the standard shell plugin IPC lifecycle'
+)
 
 assert(
   /var ids = \[1, 2, 3, 4, 5\][\s\S]*id > 0 && id <= 10/.test(overview),
@@ -141,9 +148,12 @@ assert(
   'arrow keys select workspace cards and Enter activates the selection'
 )
 assert(
-  /o\.bind\("ALT \+ TAB", "Workspace overview", "omarchy-shell shell toggle omarchy\.workspace-overview"\)/.test(tilingBindings)
-    && !/ALT \+ TAB"[\s\S]*cycle_next/.test(tilingBindings),
-  'Alt+Tab opens the workspace overview instead of cycling windows'
+  /o\.bind\("ALT \+ TAB", "Focus on next window", hl\.dsp\.window\.cycle_next\(\)\)/.test(tilingBindings)
+    && /o\.bind\("ALT \+ SHIFT \+ TAB", "Focus on previous window", hl\.dsp\.window\.cycle_next\(\{ next = false \}\)\)/.test(tilingBindings)
+    && /o\.bind\("ALT \+ TAB", "Reveal active window on top", hl\.dsp\.window\.bring_to_top\(\)\)/.test(tilingBindings)
+    && /o\.bind\("ALT \+ SHIFT \+ TAB", "Reveal active window on top", hl\.dsp\.window\.bring_to_top\(\)\)/.test(tilingBindings)
+    && !/omarchy\.workspace-overview/.test(tilingBindings),
+  'the original Alt+Tab bindings remain intact and do not open the workspace overview'
 )
 assert(
   /button === Qt\.RightButton[\s\S]*toggle\("omarchy\.workspace-overview"/.test(workspaces)
