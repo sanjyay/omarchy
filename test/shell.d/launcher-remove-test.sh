@@ -234,6 +234,18 @@ cp "$tmp_dir/system/applications/org.example.Editor.desktop" "$tmp_dir/data/appl
 [[ ! -e $tmp_dir/data/applications/vendor/personal.desktop && ! -e $tmp_dir/data/applications/vendor-personal.desktop ]] || fail "nested user launcher removal clears the source and its managed rename"
 pass "nested user launchers can be removed after renaming"
 
+# Nested TUI and web entries must never remove a top-level namesake.
+for exec in 'xdg-terminal-exec -e tool' 'omarchy-launch-webapp https://example.com'; do
+  printf '[Desktop Entry]\nName=Tool\nExec=%s\n' "$exec" >"$tmp_dir/data/applications/vendor/tool.desktop"
+  printf '[Desktop Entry]\nName=Unrelated\nExec=keep-me\n' >"$tmp_dir/data/applications/tool.desktop"
+  cp "$tmp_dir/data/applications/tool.desktop" "$tmp_dir/top-level.before"
+  "$ROOT/bin/omarchy-rename-launcher-entry" vendor-tool 'My Tool'
+  "$ROOT/bin/omarchy-remove-launcher-entry" vendor-tool 'My Tool'
+  [[ ! -e $tmp_dir/data/applications/vendor/tool.desktop && ! -e $tmp_dir/data/applications/vendor-tool.desktop ]] || fail "nested app removal clears its source and rename"
+  cmp -s "$tmp_dir/top-level.before" "$tmp_dir/data/applications/tool.desktop" || fail "nested app removal preserves its top-level namesake"
+done
+pass "renamed nested TUI and web launchers remove only the selected files"
+
 # Removing a package's source entries clears every managed copy, while keeping
 # overrides whose originals and unrelated user entries are still present.
 mkdir -p "$tmp_dir/fallback/applications"

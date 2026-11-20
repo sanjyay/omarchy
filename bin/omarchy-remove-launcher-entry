@@ -47,6 +47,15 @@ desktop_name="${desktop_file##*/}"
 desktop_name="${desktop_name%.desktop}"
 exec_line="$(sed -n 's/^Exec=//p' "$desktop_file" | head -1)"
 
+# The name-based web/TUI removers address only top-level launchers. A nested
+# user entry must be removed by its resolved path, or a namesake can be deleted.
+if is_user_desktop_file && [[ $desktop_file != "$launcher_user_dir/$desktop_file_name" ]]; then
+  rm -f "$desktop_file"
+  omarchy-refresh-launcher-renames
+  update-desktop-database "${desktop_file%/*}" &>/dev/null || true
+  exit 0
+fi
+
 if [[ $exec_line =~ omarchy-launch-webapp|omarchy-webapp-handler ]]; then
   OMARCHY_REMOVE_NOTIFY=false omarchy-webapp-remove "$desktop_name"
   omarchy-refresh-launcher-renames
